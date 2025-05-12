@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Particle Penis Anatomy</title>
+    <title>Interactive Penis Anatomy Visualizer</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #111; color: #fff; font-family: Arial, sans-serif; }
         #container { width: 100vw; height: 100vh; position: fixed; top: 0; left: 0; }
@@ -17,8 +17,10 @@
             display: flex;
             flex-direction: column;
             gap: 10px;
+            max-height: 90vh;
+            overflow-y: auto;
         }
-        #controls button, #controls select, #controls input {
+        #controls button, #controls select, #controls input[type="range"], #controls input[type="color"] {
             padding: 8px 12px;
             background-color: #444;
             color: #fff;
@@ -35,6 +37,9 @@
             font-size: 12px;
             color: #ccc;
         }
+        #controls .slider-container { display: flex; align-items: center; gap: 8px; }
+        #controls .slider-container span { min-width: 30px; text-align: right; font-size: 12px; }
+
         #infoBox {
             position: absolute;
             bottom: 20px;
@@ -47,6 +52,7 @@
         }
         #infoBox h3 { margin-top: 0; color: #0af; }
         .highlight-btn { background-color: #0af !important; color: #111 !important; }
+        .disabled- anatomically { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -60,6 +66,26 @@
             <option value="torus">Torus</option>
         </select>
 
+        <div id="penis-controls" style="display:none;">
+            <label for="shaft-length-slider">Shaft Length:</label>
+            <div class="slider-container">
+                <input type="range" id="shaft-length-slider" min="4" max="12" step="0.1" value="8">
+                <span id="shaft-length-value">8.0</span>
+            </div>
+
+            <label for="shaft-girth-slider">Shaft Girth:</label>
+            <div class="slider-container">
+                <input type="range" id="shaft-girth-slider" min="0.5" max="2.0" step="0.05" value="1.0">
+                <span id="shaft-girth-value">1.0</span>
+            </div>
+
+            <label for="glans-size-slider">Glans Size:</label>
+            <div class="slider-container">
+                <input type="range" id="glans-size-slider" min="0.7" max="1.5" step="0.05" value="1.0">
+                <span id="glans-size-value">1.0</span>
+            </div>
+        </div>
+
         <label for="color-mode-select">Color Mode:</label>
         <select id="color-mode-select">
             <option value="anatomical">Anatomical</option>
@@ -72,16 +98,18 @@
         <label for="particle-size-slider">Particle Size:</label>
         <input type="range" id="particle-size-slider" min="0.5" max="5" step="0.1" value="1.5">
 
-        <label>Highlight Anatomy:</label>
+        <label>Highlight Anatomy (Penis Shape Only):</label>
         <button id="btn-glans">Glans</button>
-        <button id="btn-shaft">Shaft (Corpora)</button>
-        <button id="btn-urethra">Urethra (Path)</button>
+        <button id="btn-corona">Corona</button>
+        <button id="btn-corpusCavernosum">Corpora Cavernosa</button>
+        <button id="btn-corpusSpongiosum">Corpus Spongiosum</button>
+        <button id="btn-urethra">Urethra Path</button>
         <button id="btn-reset-highlight">Reset Highlight</button>
     </div>
 
     <div id="infoBox">
         <h3>Penis Anatomy Visualizer</h3>
-        <p>Interact with the controls to change the particle cloud's shape and appearance. Click the "Highlight Anatomy" buttons to learn about different parts.</p>
+        <p>Interact with the controls to change the particle cloud's shape and appearance. When "Penis" shape is selected, use sliders to adjust its dimensions and click highlight buttons for details.</p>
         <div id="anatomy-info"></div>
     </div>
 
@@ -90,136 +118,114 @@
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
     <script>
-        let scene, camera, renderer, particles, controls;
+        let scene, camera, renderer, particles, orbitControls;
         let particleMaterial;
-        const numParticles = 20000;
+        const numParticles = 30000; // Increased for more detail
         const particlePositions = new Float32Array(numParticles * 3);
         const particleColors = new Float32Array(numParticles * 3);
-        const particleAlphas = new Float32Array(numParticles);
-        const particleBaseSizes = new Float32Array(numParticles);
 
-        // To store original positions for morphing and anatomical regions
         const targetPositions = {};
         let currentShape = 'penis';
         let currentColorMode = 'anatomical';
         let currentSolidColor = new THREE.Color(0x00ffff);
 
-        // Anatomical part definitions (particle indices)
-        const anatomyParts = {
-            glans: [],
-            shaft: [],
-            urethra: [] // Will be a subset of shaft/glans particles
+        const penisParams = {
+            shaftLength: 8,
+            shaftGirthFactor: 1.0,
+            glansSizeFactor: 1.0
         };
+
+        const anatomyParts = {
+            glansProper: [],
+            corona: [],
+            corpusCavernosumL: [],
+            corpusCavernosumR: [],
+            corpusSpongiosumShaft: [],
+            urethra: []
+        };
+        // Combined corpusCavernosum for easier highlighting of both
+        anatomyParts.corpusCavernosum = () => [...anatomyParts.corpusCavernosumL, ...anatomyParts.corpusCavernosumR];
+        // Combined corpusSpongiosum (shaft + glans where it forms bulk) for highlighting
+        anatomyParts.corpusSpongiosum = () => [...anatomyParts.corpusSpongiosumShaft, ...anatomyParts.glansProper]; // Glans is essentially continuation of CS
+
         const anatomyInfoContent = {
-            glans: "<h3>Glans (Head)</h3><p>The sensitive, rounded tip of the penis. It contains a high concentration of nerve endings and the opening of the urethra (meatus).</p>",
-            shaft: "<h3>Shaft (Corpora)</h3><p>The main body of the penis. Contains erectile tissues: two Corpora Cavernosa (main erectile bodies) and one Corpus Spongiosum (surrounds the urethra and forms the glans).</p>",
-            urethra: "<h3>Urethra (Path)</h3><p>A tube that runs through the Corpus Spongiosum, from the bladder to the meatus at the tip of the glans. It carries both urine and semen.</p>",
-            default: "<h3>Penis Anatomy Visualizer</h3><p>Interact with the controls to change the particle cloud's shape and appearance. Click the 'Highlight Anatomy' buttons to learn about different parts.</p>"
+            glansProper: "<h3>Glans (Head)</h3><p>The sensitive, bulbous tip of the penis, largely formed by the corpus spongiosum. It contains the urethral meatus (opening).</p>",
+            corona: "<h3>Corona</h3><p>The prominent rounded ridge at the base of the glans, separating it from the shaft. Highly sensitive.</p>",
+            corpusCavernosum: "<h3>Corpora Cavernosa</h3><p>Two parallel columns of spongy erectile tissue located on the upper side of the shaft. They fill with blood to cause an erection.</p>",
+            corpusSpongiosum: "<h3>Corpus Spongiosum</h3><p>A column of spongy erectile tissue located on the underside of the shaft, surrounding the urethra. It also forms the glans. It keeps the urethra open during erection.</p>",
+            urethra: "<h3>Urethra (Path)</h3><p>A tube that runs through the Corpus Spongiosum and glans, from the bladder to the meatus. It carries both urine and semen.</p>",
+            default: "<h3>Penis Anatomy Visualizer</h3><p>Interact with the controls. Select 'Penis' shape to use anatomical sliders and highlighting.</p>"
         };
 
         init();
         animate();
 
         function init() {
-            // Scene
             scene = new THREE.Scene();
-
-            // Camera
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.z = 15;
+            camera.position.set(0, 5, 15); // Adjusted for better initial view
 
-            // Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
             document.getElementById('container').appendChild(renderer.domElement);
 
-            // Controls
-            controls = new THREE.OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
+            orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+            orbitControls.enableDamping = true;
+            orbitControls.dampingFactor = 0.05;
 
-            // Lights
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
             scene.add(ambientLight);
             const pointLight = new THREE.PointLight(0xffffff, 0.8);
-            pointLight.position.set(5, 10, 10);
+            pointLight.position.set(10, 15, 15);
             scene.add(pointLight);
 
-            // Particle Geometry and Material
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
             geometry.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
-            // geometry.setAttribute('alpha', new THREE.BufferAttribute(particleAlphas, 1)); // For individual alpha
-            // geometry.setAttribute('size', new THREE.BufferAttribute(particleBaseSizes, 1)); // For individual size if shader material
 
             particleMaterial = new THREE.PointsMaterial({
-                size: 1.5,
+                size: 1.2, // Adjusted default size
                 vertexColors: true,
                 transparent: true,
                 opacity: 0.8,
-                blending: THREE.AdditiveBlending, // Brighter where particles overlap
-                depthWrite: false // Helps with transparency sorting issues
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
             });
 
             particles = new THREE.Points(geometry, particleMaterial);
             scene.add(particles);
 
-            // Generate initial particle positions for all shapes
-            generateShapePositions();
-            morphToShape(currentShape, true); // Initial morph without animation
+            generateInitialShapePositions();
+            morphToShape(currentShape, true);
             updateColors();
-
-            // Event Listeners
-            window.addEventListener('resize', onWindowResize, false);
-            document.getElementById('shape-select').addEventListener('change', (e) => morphToShape(e.target.value));
-            document.getElementById('color-mode-select').addEventListener('change', (e) => {
-                currentColorMode = e.target.value;
-                document.getElementById('solid-color-picker').style.display = (currentColorMode === 'solid') ? 'block' : 'none';
-                updateColors();
-            });
-            document.getElementById('solid-color-picker').addEventListener('input', (e) => {
-                currentSolidColor.set(e.target.value);
-                if (currentColorMode === 'solid') updateColors();
-            });
-            document.getElementById('particle-size-slider').addEventListener('input', (e) => {
-                particleMaterial.size = parseFloat(e.target.value);
-            });
-
-            document.getElementById('btn-glans').addEventListener('click', () => highlightAnatomy('glans'));
-            document.getElementById('btn-shaft').addEventListener('click', () => highlightAnatomy('shaft'));
-            document.getElementById('btn-urethra').addEventListener('click', () => highlightAnatomy('urethra'));
-            document.getElementById('btn-reset-highlight').addEventListener('click', () => {
-                highlightAnatomy(null);
-                updateColors(); // Reapply current color mode
-            });
-            
+            setupEventListeners();
+            updatePenisControlsVisibility();
             updateInfoBox('default');
         }
 
-        function generateShapePositions() {
+        function generateInitialShapePositions() {
             targetPositions.sphere = generateSpherePositions(5);
             targetPositions.cube = generateCubePositions(8);
             targetPositions.torus = generateTorusPositions(4, 1.5);
-            targetPositions.penis = generatePenisPositions();
+            targetPositions.penis = generatePenisPositionsDetailed(penisParams); // Initial penis with default params
         }
 
-        function generateSpherePositions(radius) {
+        function generateSpherePositions(radius) { /* ... (same as before) ... */ 
             const positions = new Float32Array(numParticles * 3);
             for (let i = 0; i < numParticles; i++) {
                 const u = Math.random();
                 const v = Math.random();
                 const theta = 2 * Math.PI * u;
                 const phi = Math.acos(2 * v - 1);
-                const r = radius * Math.cbrt(Math.random()); // Distribute points evenly within sphere volume
+                const r = radius * Math.cbrt(Math.random());
                 positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
                 positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
                 positions[i * 3 + 2] = r * Math.cos(phi);
             }
             return positions;
         }
-
-        function generateCubePositions(size) {
+        function generateCubePositions(size) { /* ... (same as before) ... */
             const positions = new Float32Array(numParticles * 3);
             const halfSize = size / 2;
             for (let i = 0; i < numParticles; i++) {
@@ -229,102 +235,183 @@
             }
             return positions;
         }
-
-        function generateTorusPositions(radius, tube) {
+        function generateTorusPositions(radius, tube) { /* ... (same as before) ... */
             const positions = new Float32Array(numParticles * 3);
             for (let i = 0; i < numParticles; i++) {
-                const theta = Math.random() * 2 * Math.PI; // Angle around the main circle
-                const phi = Math.random() * 2 * Math.PI;   // Angle around the tube's cross-section
-                
-                // To distribute points more evenly within the torus volume,
-                // we can vary the distance from the center of the tube
+                const theta = Math.random() * 2 * Math.PI; 
+                const phi = Math.random() * 2 * Math.PI;   
                 const rTube = tube * Math.sqrt(Math.random()); 
-
                 positions[i * 3] = (radius + rTube * Math.cos(phi)) * Math.cos(theta);
                 positions[i * 3 + 1] = (radius + rTube * Math.cos(phi)) * Math.sin(theta);
                 positions[i * 3 + 2] = rTube * Math.sin(phi);
             }
             return positions;
         }
-        
-        function generatePenisPositions() {
+
+        function generatePenisPositionsDetailed(params) {
             const positions = new Float32Array(numParticles * 3);
-            anatomyParts.glans = [];
-            anatomyParts.shaft = [];
-            anatomyParts.urethra = [];
+            // Reset anatomy parts
+            for (let key in anatomyParts) {
+                if (Array.isArray(anatomyParts[key])) anatomyParts[key] = [];
+            }
 
-            const shaftLength = 8;
-            const shaftRadius = 1.2;
-            const glansRadius = 1.5;
-            const glansLength = 2.5; // How much it extends beyond the shaft
+            const { shaftLength, shaftGirthFactor, glansSizeFactor } = params;
 
-            const numShaftParticles = Math.floor(numParticles * 0.7);
-            const numGlansParticles = numParticles - numShaftParticles;
+            // Base dimensions - these can be tuned
+            const BASE_CC_RADIUS = 0.6 * shaftGirthFactor; // Corpus Cavernosum radius
+            const CC_OFFSET_X = 0.65 * shaftGirthFactor;   // Horizontal offset for paired CCs
+            const CC_OFFSET_Y = 0.2 * shaftGirthFactor;    // Slight upward offset for CCs
 
-            // Shaft (Corpora Cavernosa and Spongiosum)
-            for (let i = 0; i < numShaftParticles; i++) {
-                const r = shaftRadius * Math.sqrt(Math.random()); // Distribute within circle
-                const theta = Math.random() * 2 * Math.PI;
-                const z = (Math.random() - 0.5) * shaftLength; // Centered around origin
+            const BASE_CS_RADIUS = 0.4 * shaftGirthFactor; // Corpus Spongiosum radius (shaft part)
+            const CS_OFFSET_Y = -0.7 * shaftGirthFactor;   // Vertical offset for CS (below CCs)
 
-                positions[i * 3] = r * Math.cos(theta);
-                positions[i * 3 + 1] = r * Math.sin(theta);
-                positions[i * 3 + 2] = z;
-                anatomyParts.shaft.push(i);
+            const BASE_URETHRA_RADIUS = 0.1 * shaftGirthFactor;
 
-                // Simple Urethra path (central core)
-                if (r < shaftRadius * 0.3) { // Particles in the central 30% of radius
-                    anatomyParts.urethra.push(i);
+            const GLANS_LENGTH_FACTOR = 0.3; // Glans length as a factor of shaftLength
+            const GLANS_RADIUS_FACTOR = 1.6; // Glans radius as a factor of shaft (CC) radius
+            
+            const currentGlansLength = shaftLength * GLANS_LENGTH_FACTOR * glansSizeFactor;
+            const currentGlansBaseRadius = BASE_CC_RADIUS * GLANS_RADIUS_FACTOR * glansSizeFactor; // Base of glans where it meets shaft
+            const coronaFlareFactor = 1.2; // How much wider the corona is than glans base
+
+            // Particle distribution (approximate)
+            const numParticlesCC_Each = Math.floor(numParticles * 0.25);
+            const numParticlesCS_Shaft = Math.floor(numParticles * 0.15);
+            const numParticlesGlans = Math.floor(numParticles * 0.25);
+            const numParticlesCorona = Math.floor(numParticles * 0.10);
+            // Ensure all particles are used (distribute remainder, e.g. to glans or shaft)
+            let particlesAllocated = 2 * numParticlesCC_Each + numParticlesCS_Shaft + numParticlesGlans + numParticlesCorona;
+            let remainderParticles = numParticles - particlesAllocated;
+            const numParticlesGlansAdjusted = numParticlesGlans + Math.max(0, remainderParticles);
+
+
+            let particleIdx = 0;
+
+            // Helper to add particle and assign to anatomy
+            function addParticle(x, y, z, partArray, isUrethraCandidate = false, urethraCheckRadius = BASE_URETHRA_RADIUS, urethraOffset = {x:0, y:CS_OFFSET_Y}) {
+                if (particleIdx >= numParticles) return;
+                positions[particleIdx * 3] = x;
+                positions[particleIdx * 3 + 1] = y;
+                positions[particleIdx * 3 + 2] = z;
+                partArray.push(particleIdx);
+
+                if (isUrethraCandidate) {
+                    // Check if within urethra path (simplified as cylinder through CS/Glans)
+                    const distSqToUrethraCenter = (x - urethraOffset.x)**2 + (y - urethraOffset.y)**2;
+                    if (distSqToUrethraCenter < urethraCheckRadius**2) {
+                        anatomyParts.urethra.push(particleIdx);
+                    }
+                }
+                particleIdx++;
+            }
+            
+            // 1. Corpora Cavernosa (Paired)
+            for (let cc = 0; cc < 2; cc++) { // 0 for Left, 1 for Right
+                const xOffset = (cc === 0 ? -CC_OFFSET_X : CC_OFFSET_X);
+                const currentCCArray = (cc === 0 ? anatomyParts.corpusCavernosumL : anatomyParts.corpusCavernosumR);
+                for (let i = 0; i < numParticlesCC_Each; i++) {
+                    const r = BASE_CC_RADIUS * Math.sqrt(Math.random());
+                    const theta = Math.random() * 2 * Math.PI;
+                    const z = (Math.random() - 0.5) * shaftLength; // Centered for now
+
+                    addParticle(
+                        xOffset + r * Math.cos(theta),
+                        CC_OFFSET_Y + r * Math.sin(theta),
+                        z,
+                        currentCCArray
+                    );
                 }
             }
 
-            // Glans
-            const glansBaseZ = shaftLength / 2;
-            for (let i = 0; i < numGlansParticles; i++) {
-                const particleIndex = numShaftParticles + i;
-                // Make it somewhat bulbous, tapering from base to tip
-                const u = Math.random(); // For distributing along length
+            // 2. Corpus Spongiosum (Shaft portion)
+            for (let i = 0; i < numParticlesCS_Shaft; i++) {
+                const r = BASE_CS_RADIUS * Math.sqrt(Math.random());
+                const theta = Math.random() * 2 * Math.PI;
+                const z = (Math.random() - 0.5) * shaftLength;
+
+                addParticle(
+                    r * Math.cos(theta), // Centered on X for CS shaft
+                    CS_OFFSET_Y + r * Math.sin(theta),
+                    z,
+                    anatomyParts.corpusSpongiosumShaft,
+                    true // isUrethraCandidate
+                );
+            }
+
+            // Shaft End Z position
+            const shaftEnd_Z = shaftLength / 2;
+
+            // 3. Glans Proper (main body of glans, continuation of CS)
+            for (let i = 0; i < numParticlesGlansAdjusted; i++) {
+                const u = Math.random(); // For distributing along length of glans
                 const v = Math.random(); // For distributing radially
 
-                const currentZRelative = u * glansLength; // 0 to glansLength
-                // Radius decreases from glansRadius at base to 0 at tip (parabolic for smoother tip)
-                const currentRadius = glansRadius * (1 - Math.pow(currentZRelative / glansLength, 2));
+                const z_relative_to_glans_base = u * currentGlansLength;
+                // Parabolic tapering for glans shape from base to tip
+                const currentGlansRadiusAtZ = currentGlansBaseRadius * (1 - Math.pow(z_relative_to_glans_base / currentGlansLength, 1.5));
                 
-                const r = currentRadius * Math.sqrt(v); // Distribute within circle
+                const r = currentGlansRadiusAtZ * Math.sqrt(v);
                 const theta = Math.random() * 2 * Math.PI;
 
-                positions[particleIndex * 3] = r * Math.cos(theta);
-                positions[particleIndex * 3 + 1] = r * Math.sin(theta);
-                positions[particleIndex * 3 + 2] = glansBaseZ + currentZRelative;
-                anatomyParts.glans.push(particleIndex);
-                
-                // Urethra path continues into glans
-                if (r < glansRadius * 0.2) { // Smaller core in glans
-                     anatomyParts.urethra.push(particleIndex);
-                }
+                addParticle(
+                    r * Math.cos(theta), // Centered on X for glans
+                    CS_OFFSET_Y + r * Math.sin(theta), // Y offset same as CS
+                    shaftEnd_Z + z_relative_to_glans_base,
+                    anatomyParts.glansProper,
+                    true // isUrethraCandidate
+                );
             }
+            
+            // 4. Corona (Ring at the base of the glans)
+            const coronaRadius = currentGlansBaseRadius * coronaFlareFactor;
+            const coronaInnerRadius = currentGlansBaseRadius * 0.9; // slight overlap with glans base
+            const coronaThicknessZ = 0.5 * glansSizeFactor; // How "thick" the corona band is along Z
+
+            for (let i = 0; i < numParticlesCorona; i++) {
+                // Distribute in a thick ring
+                const angle = Math.random() * Math.PI * 2;
+                // Random radius between inner and outer corona edge
+                const r_corona = coronaInnerRadius + Math.random() * (coronaRadius - coronaInnerRadius);
+                const z_corona = shaftEnd_Z + (Math.random() - 0.5) * coronaThicknessZ; // Centered around shaftEnd_Z
+
+                addParticle(
+                    r_corona * Math.cos(angle),
+                    CS_OFFSET_Y + r_corona * Math.sin(angle), // Maintain Y offset
+                    z_corona,
+                    anatomyParts.corona,
+                    false // Not typically where main urethra path is for simple model
+                );
+            }
+            
+            // If any particles are left (due to Math.floor), distribute them randomly in shaft
+            while(particleIdx < numParticles) {
+                const r = BASE_CC_RADIUS * Math.sqrt(Math.random()); // Use CC radius as general shaft extent
+                const theta = Math.random() * 2 * Math.PI;
+                const z = (Math.random() - 0.5) * shaftLength;
+                addParticle(r * Math.cos(theta), r * Math.sin(theta), z, anatomyParts.corpusCavernosumL); // Add to one part as fallback
+            }
+
             return positions;
         }
 
 
         function morphToShape(shapeName, immediate = false) {
-            if (!targetPositions[shapeName]) {
-                console.warn(`Shape ${shapeName} not defined.`);
+            currentShape = shapeName;
+            updatePenisControlsVisibility();
+            const newPositions = targetPositions[shapeName];
+            if (!newPositions) {
+                console.warn(`Shape ${shapeName} data not found.`);
                 return;
             }
-            currentShape = shapeName;
-            const newPositions = targetPositions[shapeName];
             const positionAttribute = particles.geometry.attributes.position;
 
-            if (immediate) {
+            if (immediate || (currentShape === shapeName && shapeName === 'penis')) { // Immediate for penis param changes
                 for (let i = 0; i < numParticles; i++) {
                     positionAttribute.setXYZ(i, newPositions[i * 3], newPositions[i * 3 + 1], newPositions[i * 3 + 2]);
                 }
                 positionAttribute.needsUpdate = true;
-                updateColors(); // Update colors based on new shape if needed
+                updateColors();
             } else {
-                // Anime.js for smooth transition
-                // Create a temporary object for Anime.js to tween
                 const targets = [];
                 for (let i = 0; i < numParticles; i++) {
                     targets.push({
@@ -333,7 +420,7 @@
                         z: positionAttribute.getZ(i)
                     });
                 }
-
+                anime.remove(targets); // Remove any ongoing animation on these targets
                 anime({
                     targets: targets,
                     x: (p, i) => newPositions[i * 3],
@@ -348,73 +435,69 @@
                         positionAttribute.needsUpdate = true;
                     },
                     complete: function() {
-                        updateColors(); // Update colors once morphing is complete
+                        updateColors();
                     }
                 });
             }
-             // Reset any highlights when shape changes
-            highlightAnatomy(null);
+            highlightAnatomy(null); // Reset highlight on shape change
             updateInfoBox('default');
-            if (shapeName !== 'penis') {
-                document.getElementById('btn-glans').disabled = true;
-                document.getElementById('btn-shaft').disabled = true;
-                document.getElementById('btn-urethra').disabled = true;
-            } else {
-                document.getElementById('btn-glans').disabled = false;
-                document.getElementById('btn-shaft').disabled = false;
-                document.getElementById('btn-urethra').disabled = false;
+        }
+        
+        function updatePenisGeometry() {
+            if (currentShape !== 'penis') return;
+            targetPositions.penis = generatePenisPositionsDetailed(penisParams);
+            // We want an immediate update for slider changes, not a full morph animation
+            const newPositions = targetPositions.penis;
+            const positionAttribute = particles.geometry.attributes.position;
+            for (let i = 0; i < numParticles; i++) {
+                positionAttribute.setXYZ(i, newPositions[i * 3], newPositions[i * 3 + 1], newPositions[i * 3 + 2]);
             }
+            positionAttribute.needsUpdate = true;
+            updateColors(); // Re-apply colors as particle assignments might change
         }
 
-        function updateColors(highlightPart = null, highlightColor = new THREE.Color(0xffff00)) {
+        function updateColors(highlightKey = null, highlightColor = new THREE.Color(0xffff00)) {
             const colorAttribute = particles.geometry.attributes.color;
             const positionAttribute = particles.geometry.attributes.position;
             const baseColor = new THREE.Color();
+            const dimColor = new THREE.Color(0x333333);
+
+            let highlightedIndices = [];
+            if (highlightKey) {
+                if (typeof anatomyParts[highlightKey] === 'function') {
+                    highlightedIndices = anatomyParts[highlightKey]();
+                } else if (Array.isArray(anatomyParts[highlightKey])) {
+                    highlightedIndices = anatomyParts[highlightKey];
+                }
+            }
 
             for (let i = 0; i < numParticles; i++) {
-                let R, G, B;
-
-                if (highlightPart) {
-                    if (anatomyParts[highlightPart] && anatomyParts[highlightPart].includes(i)) {
-                        baseColor.set(highlightColor);
-                    } else {
-                        baseColor.set(0x333333); // Dim unhighlighted parts
-                    }
-                } else {
+                if (highlightKey && highlightedIndices.includes(i)) {
+                    baseColor.set(highlightColor);
+                } else if (highlightKey) { // Dim non-highlighted parts
+                    baseColor.set(dimColor);
+                } else { // Standard coloring
                     switch (currentColorMode) {
                         case 'anatomical':
                             if (currentShape === 'penis') {
-                                if (anatomyParts.glans.includes(i)) {
-                                    baseColor.setHSL(0.0, 0.8, 0.6); // Pink/Reddish for glans
-                                } else if (anatomyParts.shaft.includes(i)) {
-                                    baseColor.setHSL(0.05, 0.7, 0.5); // Slightly different for shaft
-                                } else {
-                                    baseColor.setHSL(Math.random(), 0.7, 0.5); // Fallback
-                                }
-                                 // Urethra particles can be subtly different if desired, but keep it simple for now
-                                if (anatomyParts.urethra.includes(i)) {
-                                     baseColor.lerp(new THREE.Color(0x87CEEB), 0.3); // Slightly bluer tint for urethra
-                                }
+                                if (anatomyParts.glansProper.includes(i)) baseColor.setHSL(0.0, 0.9, 0.65); // Pinker Glans
+                                else if (anatomyParts.corona.includes(i)) baseColor.setHSL(0.02, 0.8, 0.6); // Slightly diff for Corona
+                                else if (anatomyParts.corpusCavernosumL.includes(i) || anatomyParts.corpusCavernosumR.includes(i)) baseColor.setHSL(0.05, 0.7, 0.55); // Shaft CCs
+                                else if (anatomyParts.corpusSpongiosumShaft.includes(i)) baseColor.setHSL(0.08, 0.65, 0.5); // Shaft CS
+                                else baseColor.setHSL(0.1, 0.5, 0.4); // Fallback for any unassigned penis particles
 
+                                if (anatomyParts.urethra.includes(i)) {
+                                     baseColor.lerp(new THREE.Color(0xadd8e6), 0.4); // Tint urethra particles light blue
+                                }
                             } else {
-                                baseColor.setHSL(Math.random(), 0.7, 0.5); // Random for other shapes
+                                baseColor.setHSL(Math.random(), 0.7, 0.5);
                             }
                             break;
-                        case 'random':
-                            baseColor.setHSL(Math.random(), 0.7, 0.5);
-                            break;
-                        case 'solid':
-                            baseColor.set(currentSolidColor);
-                            break;
+                        case 'random': baseColor.setHSL(Math.random(), 0.7, 0.5); break;
+                        case 'solid': baseColor.set(currentSolidColor); break;
                         case 'positional':
-                            const x = positionAttribute.getX(i);
-                            const y = positionAttribute.getY(i);
-                            const z = positionAttribute.getZ(i);
-                            // Normalize positions roughly (assuming shape extent is ~10)
-                            R = Math.abs(x / 10);
-                            G = Math.abs(y / 10);
-                            B = Math.abs(z / 10);
-                            baseColor.setRGB(R, G, B);
+                            const x = positionAttribute.getX(i); const y = positionAttribute.getY(i); const z = positionAttribute.getZ(i);
+                            baseColor.setRGB(Math.abs(x / 10), Math.abs(y / 10), Math.abs(z / 10));
                             break;
                     }
                 }
@@ -423,27 +506,45 @@
             colorAttribute.needsUpdate = true;
         }
 
-        function highlightAnatomy(partName) {
-            // Reset previous highlights visually
-            const buttons = [
-                document.getElementById('btn-glans'),
-                document.getElementById('btn-shaft'),
-                document.getElementById('btn-urethra')
-            ];
-            buttons.forEach(btn => btn.classList.remove('highlight-btn'));
+        function highlightAnatomy(partKey) {
+            const anatomyButtons = document.querySelectorAll('#controls button[id^="btn-"]');
+            anatomyButtons.forEach(btn => btn.classList.remove('highlight-btn'));
 
-            if (partName && currentShape === 'penis') {
-                updateColors(partName, new THREE.Color(0xffff00)); // Yellow highlight
-                document.getElementById(`btn-${partName}`).classList.add('highlight-btn');
-                updateInfoBox(partName);
+            if (partKey && currentShape === 'penis') {
+                updateColors(partKey, new THREE.Color(0xf0e68c)); // Khaki highlight
+                const activeBtn = document.getElementById(`btn-${partKey.replace('Proper', '').replace('Shaft','')}`); // Handle combined keys for buttons
+                if(activeBtn) activeBtn.classList.add('highlight-btn');
+                updateInfoBox(partKey);
             } else {
-                updateColors(); // Revert to current color mode
+                updateColors();
                 updateInfoBox('default');
             }
         }
+        
+        function updatePenisControlsVisibility() {
+            const penisControlsDiv = document.getElementById('penis-controls');
+            const anatomyButtons = document.querySelectorAll('#controls button[id^="btn-"]');
+            if (currentShape === 'penis') {
+                penisControlsDiv.style.display = 'flex';
+                penisControlsDiv.style.flexDirection = 'column';
+                penisControlsDiv.style.gap = '10px';
+                anatomyButtons.forEach(btn => btn.disabled = false);
+            } else {
+                penisControlsDiv.style.display = 'none';
+                anatomyButtons.forEach(btn => {
+                    btn.disabled = true;
+                    btn.classList.remove('highlight-btn');
+                });
+            }
+        }
 
-        function updateInfoBox(partName) {
-            document.getElementById('anatomy-info').innerHTML = anatomyInfoContent[partName] || anatomyInfoContent['default'];
+        function updateInfoBox(partKey) {
+            let contentKey = partKey;
+            if (partKey === 'glansProper') contentKey = 'glansProper'; // Ensure it maps correctly
+            if (partKey === 'corpusCavernosumL' || partKey === 'corpusCavernosumR') contentKey = 'corpusCavernosum';
+            if (partKey === 'corpusSpongiosumShaft') contentKey = 'corpusSpongiosum';
+
+            document.getElementById('anatomy-info').innerHTML = anatomyInfoContent[contentKey] || anatomyInfoContent['default'];
         }
 
         function onWindowResize() {
@@ -454,9 +555,51 @@
 
         function animate() {
             requestAnimationFrame(animate);
-            controls.update(); // For damping
-            // particles.rotation.y += 0.001; // Optional auto-rotation
+            orbitControls.update();
             renderer.render(scene, camera);
+        }
+
+        function setupEventListeners() {
+            window.addEventListener('resize', onWindowResize, false);
+            document.getElementById('shape-select').addEventListener('change', (e) => morphToShape(e.target.value));
+            
+            document.getElementById('color-mode-select').addEventListener('change', (e) => {
+                currentColorMode = e.target.value;
+                document.getElementById('solid-color-picker').style.display = (currentColorMode === 'solid') ? 'block' : 'none';
+                updateColors();
+            });
+            document.getElementById('solid-color-picker').addEventListener('input', (e) => {
+                currentSolidColor.set(e.target.value);
+                if (currentColorMode === 'solid') updateColors();
+            });
+            document.getElementById('particle-size-slider').addEventListener('input', (e) => {
+                particleMaterial.size = parseFloat(e.target.value);
+            });
+
+            // Penis parameter sliders
+            ['shaft-length', 'shaft-girth', 'glans-size'].forEach(param => {
+                const slider = document.getElementById(`${param}-slider`);
+                const valueDisplay = document.getElementById(`${param}-value`);
+                slider.addEventListener('input', (e) => {
+                    const value = parseFloat(e.target.value);
+                    valueDisplay.textContent = value.toFixed(param === 'shaft-girth' || param === 'glans-size' ? 2 : 1);
+                    if (param === 'shaft-length') penisParams.shaftLength = value;
+                    else if (param === 'shaft-girth') penisParams.shaftGirthFactor = value;
+                    else if (param === 'glans-size') penisParams.glansSizeFactor = value;
+                    
+                    if (currentShape === 'penis') {
+                        updatePenisGeometry();
+                    }
+                });
+            });
+
+            // Anatomy highlight buttons
+            document.getElementById('btn-glans').addEventListener('click', () => highlightAnatomy('glansProper'));
+            document.getElementById('btn-corona').addEventListener('click', () => highlightAnatomy('corona'));
+            document.getElementById('btn-corpusCavernosum').addEventListener('click', () => highlightAnatomy('corpusCavernosum')); // Highlights both L and R
+            document.getElementById('btn-corpusSpongiosum').addEventListener('click', () => highlightAnatomy('corpusSpongiosum')); // Highlights shaft and glans CS
+            document.getElementById('btn-urethra').addEventListener('click', () => highlightAnatomy('urethra'));
+            document.getElementById('btn-reset-highlight').addEventListener('click', () => highlightAnatomy(null));
         }
 
     </script>
